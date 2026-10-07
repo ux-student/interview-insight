@@ -10,7 +10,7 @@
 
 ```
 逐字稿 → 角色分离与清洗 → 三级编码 → 影响程度分级 → 优先级判定 → 洞察报告
-         ([S编号]可溯源)   (开放/轴心/选择)  (1-4级锚点)   (判定规则表)   (+反例记录)
+         (语段可溯源)     (开放/轴心/选择) (1-4级锚点)   (判定规则表)  (+反例记录)
 ```
 
 ## 与"让 AI 总结一下访谈"的区别
@@ -43,7 +43,10 @@
 # Claude Code
 git clone https://github.com/ux-student/interview-insight.git ~/.claude/skills/interview-insight
 
-# 其他支持 SKILL.md 的工具：放入对应的 skills 目录
+# WorkBuddy
+git clone https://github.com/ux-student/interview-insight.git ~/.workbuddy/skills/interview-insight
+
+# 其他支持 SKILL.md 的工具（Codex / Cursor 等）：放入对应的 skills 目录
 ```
 
 ## 快速开始
@@ -57,7 +60,7 @@ git clone https://github.com/ux-student/interview-insight.git ~/.claude/skills/i
 ```
 interview_analysis/
 ├── 00_raw/          原始逐字稿（只读）
-├── 01_segments/     cleaned_text.txt（含 [S编号]）、word_stats.json
+├── 01_segments/     cleaned_text.txt（带语段编号）、word_stats.json
 ├── 02_codes/        open_codes.md
 ├── 03_axial/        axial_codes.md
 ├── 04_themes/       themes.md、tension_record.md
@@ -65,12 +68,14 @@ interview_analysis/
 └── decision_log.md  决策日志
 ```
 
+> **多份访谈的编号**：一次传入多个文件时，脚本自动加受访者前缀（`[U1-S01]`、`[U2-S01]`），并在 `word_stats.json` 的 `respondent_map` 中记录 U 号与源文件的对应关系及各自语段区间。这样报告中"x/N 名受访者提及"的每个 N 都能被逐条核对——若只做全局连续编号，`[S05]` 出自谁将无法查证。
+
 ## 方法学说明（请如实随交付物声明）
 
 - **编码技术**：开放编码—轴心编码—选择编码三级路径，源自 Strauss 与 Corbin 在《Basics of Qualitative Research》中系统化的程序化编码技术。本工具是编码技术层面的**用研适配**，不是完整的扎根理论研究流程。
 - **不含**：理论抽样与理论饱和判定、持续比较至理论生成、备忘录与研究者反身性的系统记录、编码者间一致性检验。
 - **频次的含义**：频次仅表示**提及分布**，不表示影响强度。本工具不把"提及人多"等同于"问题更重要"，优先级由影响程度分级与分布共同判定，且两者分列呈现。
-- **"原话"的含义**：报告中的原话引自**清洗后文本**（已移除语气词与重复标点），保留语义与用词，但不是录音逐字的字面转写。如需逐字引用，须回 `00_raw/` 取原文。
+- **"原话"的含义**：报告中的原话引自**清洗后文本**（已移除语气词与停顿标记），保留语义与用词，但不是录音逐字的字面转写。如需逐字引用，加 `--keep-fillers` 重跑预处理，或回 `00_raw/` 取原文。
 
 ## 目录结构
 
@@ -88,7 +93,7 @@ interview-insight/
 │   ├── tension-record.md         # 反例与张力记录（中间产物）
 │   └── decision_log.md           # 决策日志（中间产物）
 ├── scripts/
-│   └── preprocess.py             # 角色分离、清洗、词频统计
+│   └── preprocess.py             # 角色分离、清洗、词频统计、受访者映射
 └── examples/
     └── demo-case.md              # 完整流程演示（虚构语料）
 ```

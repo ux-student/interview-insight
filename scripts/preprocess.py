@@ -6,23 +6,31 @@
 功能：
   1. 自动识别并分离访谈逐字稿中的角色（访谈者/受访者、问/答、Q/A 等），支持显式指定标签
   2. 提取目标角色（默认受访者/用户）的全部发言
-  3. 清洗语气词、重复标点与冗余空白（保留语义，不做改写）
+  3. 清洗语气词、停顿标记、重复标点与冗余空白（保留语义，不做改写）
   4. 统计高频词（优先 jieba，未安装时降级为 n-gram 统计）
   5. 单独统计"空白语段"（未回答、极短回应）——沉默也是数据，不得当作噪声丢弃
   6. 支持标准化工作目录结构（--workdir）
+  7. 多份访谈自动加受访者前缀（[U1-S03]），保证"语段 → 受访者"可反查
 
 用法：
   python3 preprocess.py --input 00_raw/访谈A.txt --workdir interview_analysis --segments
-  python3 preprocess.py --input 00_raw/访谈A.txt --outputdir ./out --role interviewer
-  python3 preprocess.py --input 00_raw/*.txt --outputdir ./out --participant-labels "参与者A,参与者B"
+  python3 preprocess.py --input 00_raw/ --workdir interview_analysis --segments
+  python3 preprocess.py --input 00_raw/U1.txt --role interviewer --outputdir ./out
+  python3 preprocess.py --input 00_raw/*.txt --workdir out --participant-labels "参与者A,参与者B"
+  python3 preprocess.py --input 00_raw/U1.txt --workdir out --keep-fillers   # 保留语气词，供逐字引用
 
 输出：
   <outputdir>/cleaned_text.txt   清洗后的目标角色发言（带 [S编号]，便于溯源）
-  <outputdir>/word_stats.json    高频词、语段统计与空白语段记录
+  <outputdir>/word_stats.json    高频词、语段统计、受访者映射与空白语段记录
 
 说明：
-  清洗会移除语气词与重复标点，因此 cleaned_text 不再是逐字字面转写。
-  报告中的"原话"引自本文件；如需严格逐字引用，须回原始逐字稿取。
+  清洗会移除语气词与停顿标记，因此 cleaned_text 不再是逐字字面转写。
+  报告中的"原话"引自本文件；如需严格逐字引用，请加 --keep-fillers 重跑，或回原始逐字稿取。
+
+编号规则：
+  单份访谈            → [S01] [S02] ...
+  两份及以上访谈      → [U1-S01] [U2-S01] ...（受访者号 + 该受访者内的语段号）
+  "U几" 与源文件的对应关系记录在 word_stats.json 的 respondent_map 中。
 """
 import argparse
 import json
@@ -31,10 +39,10 @@ import re
 import sys
 from collections import Counter
 
-# 角色标记：key=角色类别，value=行首标记正则（冒号支持中英文）
-SPEAKER_PATTERNS = {
-    "interviewer": r"^(?:访谈者|访谈员|采访者|主持人|研究员|问|Q|I|Interviewer)\s*[:：]",
-    "user": r"^(?:受访者|被访者|用户|参与者|嘉宾|答|A|R|Interviewee|Participant)\s*[:：]",
+# 角色标记词表：行首出现这些词（紧跟中英文冒号）即判定为对应角色
+SPEAKER_LABELS = {
+    "interviewer": ["访谈者", "访谈员", "采访者", "主持人", "研究员", "问", "Q", "I", "Interviewer"],
+    "user": ["受访者", "被访者", "用户", "参与者", "嘉宾", "答", "A", "R", "Interviewee", "Participant"],
 }
 
 # 清洗时移除的填充词/语气词（仅移除独立出现的，避免破坏句内语义）
@@ -67,19 +75,28 @@ WORKDIR_TREE = [
 # 极短回应判定：清洗后长度不超过该值，视为可能的空白/敷衍语段
 SHORT_SEGMENT_MAXLEN = 4
 
+# 标点类（用于合并连续标点）
+PUNCT_CLASS = "，。！？、,.!?"
+
 
 def build_patterns(extra_labels, role_key):
-    """在默认标签基础上合并用户显式指定的标签。"""
-    base = SPEAKER_PATTERNS[role_key]
-    labels = [x.strip() for x in (extra_labels or "").replace("，", ",").split(",") if x.strip()]
-    if not labels:
-        return base
-    alt = "|".join(re.escape(x) for x in labels)
-    return r"^(?:" + alt + r"|" + base.replace("^(?:", "").rstrip(")") + r")\s*[:：]"
+    """在默认标签基础上合并用户显式指定的标签，返回行首角色标记正则。
+
+    注意：必须建构为「单一括号包裹的交替组」，且自定义标签在前、默认标签在后，
+    按长度降序排列以避免短标签吞掉长标签。
+    """
+    base = SPEAKER_LABELS[role_key]
+    extra = [x.strip() for x in (extra_labels or "").replace("，", ",").split(",") if x.strip()]
+    # 自定义标签优先，同时去重（保持自定义顺序在前）
+    merged = extra + [x for x in base if x not in extra]
+    # 长标签优先，防止 "参与者" 抢先匹配 "参与者A"
+    merged = sorted(dict.fromkeys(merged), key=len, reverse=True)
+    alt = "|".join(re.escape(x) for x in merged)
+    return r"^(?:" + alt + r")\s*[:：]"
 
 
 def parse_speakers(raw_text, interviewer_re, user_re):
-    """按行首角色标记拆分对话，返回 [(role, content), ...]；无标记时整体归为 user。"""
+    """按行首角色标记拆分对话，返回 ([(role, content), ...], 是否匹配到任何标记)。"""
     segments = []
     current_role = None
     current_lines = []
@@ -121,24 +138,34 @@ def parse_speakers(raw_text, interviewer_re, user_re):
 def extract_role(segments, role):
     """提取目标角色的发言段落列表。"""
     target = (role or "user").lower()
-    if target in ("interviewer", "q", "i"):
-        wanted = "interviewer"
-    else:
-        wanted = "user"
+    wanted = "interviewer" if target in ("interviewer", "q", "i") else "user"
     return [content for r, content in segments if r == wanted and content.strip()]
 
 
-def clean_text(text):
-    """清洗单段发言：去填充词、规范标点与空白，不改写语义。"""
-    for f in FILLERS:
-        text = text.replace(f, "")
-    for f in STANDALONE_FILLERS:
-        text = re.sub(r"(?<![\u4e00-\u9fa5a-zA-Z])" + re.escape(f) + r"(?=[，。！？、,.!?~ ]|$)", "", text)
-    text = re.sub(r"([，。！？、,.!?]){2,}", lambda m: m.group(1), text)
+def clean_text(text, strip_fillers=True):
+    """清洗单段发言：去填充词与停顿标记、规范标点与空白，不改写语义。
+
+    strip_fillers=False 时保留语气词（用于需要逐字引用的场景），
+    但标点与空白的规范化仍然执行——它不改变用词。
+    """
+    if strip_fillers:
+        for f in FILLERS:
+            text = text.replace(f, "")
+        for f in STANDALONE_FILLERS:
+            # 后接标点、省略号、空白或行尾的独立语气词
+            text = re.sub(
+                r"(?<![\u4e00-\u9fa5a-zA-Z])" + re.escape(f) + r"(?=[" + PUNCT_CLASS + r"~…\s]|$)",
+                "", text,
+            )
+    # 省略号规范化：3 个以上合并为标准的「……」，不并入下面的标点合并（否则会被压成单个 …）
+    text = re.sub(r"…{3,}", "……", text)
+    # 连续标点合并为一个（取最后一个）
+    text = re.sub(r"([" + PUNCT_CLASS + r"]){2,}", lambda m: m.group(1), text)
     text = re.sub(r"~{2,}", "~", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
-    text = re.sub(r"^[，、,\s]+", "", text, flags=re.MULTILINE)
+    # 行首残留的标点、省略号与空白
+    text = re.sub(r"^[…" + PUNCT_CLASS + r"\s]+", "", text, flags=re.MULTILINE)
     return text.strip()
 
 
@@ -209,11 +236,12 @@ def main():
     ap.add_argument("--topn", "-n", type=int, default=30, help="高频词输出数量（默认30）")
     ap.add_argument("--segments", action="store_true", help="清洗结果按段落分块并编号")
     ap.add_argument("--interviewer-labels", default=None,
-                    help="显式指定访谈者标签（逗号分隔），比让脚本猜测可靠")
+                    help="追加访谈者标签（逗号分隔），与内置标签合并。比让脚本猜测可靠")
     ap.add_argument("--participant-labels", default=None,
-                    help="显式指定受访者标签（逗号分隔）")
-    ap.add_argument("--strip-fillers", action="store_true",
-                    help="启用语气词清洗（默认启用）。注意：会改变原文用词，报告中须留痕")
+                    help="追加受访者标签（逗号分隔），与内置标签合并")
+    ap.add_argument("--keep-fillers", action="store_true",
+                    help="保留语气词与停顿标记（默认移除）。需要逐字引用原话时使用；"
+                         "注意保留后 cleaned_text 更接近逐字稿，但可读性下降")
     args = ap.parse_args()
 
     # 目录解析
@@ -228,18 +256,22 @@ def main():
 
     interviewer_re = re.compile(build_patterns(args.interviewer_labels, "interviewer"), re.IGNORECASE)
     user_re = re.compile(build_patterns(args.participant_labels, "user"), re.IGNORECASE)
+    strip_fillers = not args.keep_fillers
 
-    all_cleaned = []
-    per_file = []
+    # 按输入顺序为每个文件分配受访者编号（跳过的文件同样占号，避免错位）
+    respondent_map = []
+    indexed_segments = []          # [(respondent_id, content), ...]
     empty_segments = []
     no_marker_files = []
 
-    for path in files:
+    for idx, path in enumerate(files):
+        rid = f"U{idx + 1}"
         try:
             with open(path, "r", encoding="utf-8") as f:
                 raw = f.read()
         except (OSError, UnicodeDecodeError) as e:
             print(f"[WARN] 跳过 {path}：{e}", file=sys.stderr)
+            respondent_map.append({"id": rid, "file": path, "status": "skipped", "reason": str(e)})
             continue
 
         segments, matched = parse_speakers(raw, interviewer_re, user_re)
@@ -249,27 +281,54 @@ def main():
         role_texts = extract_role(segments, args.role)
         if not role_texts:
             print(f"[WARN] {path} 中未识别到角色「{args.role}」的发言", file=sys.stderr)
+            respondent_map.append({"id": rid, "file": path, "status": "skipped",
+                                   "reason": f"未识别到角色「{args.role}」的发言"})
             continue
 
-        cleaned = [clean_text(t) for t in role_texts]
+        cleaned = [clean_text(t, strip_fillers=strip_fillers) for t in role_texts]
         # 空白/极短语段单独记录：无实义内容的剔除出正文，短但有实义的保留
         kept = []
         for t in cleaned:
             if not has_content(t):
-                empty_segments.append({"file": path, "content": t, "reason": "清洗后无实义内容（纯标点或空白）"})
+                empty_segments.append({"respondent": rid, "file": path, "content": t,
+                                       "reason": "清洗后无实义内容（纯标点或空白）"})
                 continue
             if len(t) <= SHORT_SEGMENT_MAXLEN:
-                empty_segments.append({"file": path, "content": t, "reason": "极短回应"})
+                empty_segments.append({"respondent": rid, "file": path, "content": t,
+                                       "reason": "极短回应"})
             kept.append(t)
 
-        all_cleaned.extend(kept)
-        per_file.append({"file": path, "segment_count": len(kept)})
+        for t in kept:
+            indexed_segments.append((rid, t))
+        respondent_map.append({"id": rid, "file": path, "status": "ok", "segment_count": len(kept)})
 
-    if not all_cleaned:
+    if not indexed_segments:
         sys.exit("没有可输出的有效语段，请检查逐字稿角色标记或改用 --role interviewer")
 
+    ok_respondents = [r for r in respondent_map if r["status"] == "ok"]
+    multi = len(ok_respondents) > 1
+
+    # 编号：单份 [S01]；多份 [U1-S01]（受访者号 + 该受访者内序号）
+    counters = {}
+    lines = []
+    for rid, content in indexed_segments:
+        counters[rid] = counters.get(rid, 0) + 1
+        n = counters[rid]
+        label = f"{rid}-S{n:02d}" if multi else f"S{n:02d}"
+        lines.append((rid, label, content))
+
+    # 为每份访谈记录语段编号区间，便于「语段 → 受访者」反查
+    ranges = {}
+    for rid, label, _ in lines:
+        ranges.setdefault(rid, []).append(label)
+    for entry in respondent_map:
+        rng = ranges.get(entry["id"])
+        if rng:
+            entry["segment_labels"] = f"{rng[0]}–{rng[-1]}" if len(rng) > 1 else rng[0]
+
+    all_cleaned = [c for _, _, c in lines]
     if args.segments:
-        body = "\n\n".join(f"[S{i+1:02d}] {t}" for i, t in enumerate(all_cleaned))
+        body = "\n\n".join(f"[{label}] {content}" for _, label, content in lines)
     else:
         body = "\n\n".join(all_cleaned)
 
@@ -279,15 +338,21 @@ def main():
         "source_files": files,
         "analyzed_role": args.role,
         "file_count": len(files),
+        "respondent_count": len(ok_respondents),
         "segment_count": len(all_cleaned),
         "total_chars": sum(len(t) for t in all_cleaned),
         "tokenize_method": method,
-        "fillers_stripped": True,  # 清洗默认启用，报告中须声明
+        "fillers_stripped": strip_fillers,
+        "index_scheme": "respondent-prefixed" if multi else "flat",
+        "respondent_map": respondent_map,
         "files_without_role_marker": no_marker_files,
         "empty_or_short_segments": empty_segments,
-        "per_file": per_file,
         "top_words": [{"word": w, "count": c} for w, c in top_words],
-        "note": "原话引自本清洗文本，非逐字转写；如需逐字引用须回 00_raw/ 取原文。",
+        "note": (
+            "原话引自本清洗文本，非逐字转写；如需逐字引用请加 --keep-fillers 重跑，或回 00_raw/ 取原文。"
+            if strip_fillers else
+            "本次已保留语气词（--keep-fillers），文本更接近逐字转写；仍建议核对 00_raw/ 以确认无转写误差。"
+        ),
     }
 
     cleaned_path = os.path.join(outdir, "cleaned_text.txt")
@@ -298,7 +363,8 @@ def main():
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
     print(f"[OK] 预处理完成（分词方式：{method}）")
-    print(f"   文件数：{len(files)}｜语段数：{len(all_cleaned)}｜总字数：{stats['total_chars']}")
+    print(f"   文件数：{len(files)}｜受访者：{len(ok_respondents)}｜语段数：{len(all_cleaned)}｜总字数：{stats['total_chars']}")
+    print(f"   编号方式：{'[U1-S01] 形式（多份访谈，可反查受访者）' if multi else '[S01] 形式（单份访谈）'}")
     print(f"   清洗文本：{cleaned_path}")
     print(f"   统计文件：{stats_path}")
     print("   Top10 高频词：" + " / ".join(f"{w}({c})" for w, c in top_words[:10]))
@@ -309,10 +375,13 @@ def main():
         print(f"   [提示] {len(no_marker_files)} 个文件未识别到角色标记，已整体视为用户发言：")
         for p in no_marker_files:
             print(f"          - {p}")
-        print("          建议用 --interviewer-labels / --participant-labels 显式指定，比让脚本猜测可靠。")
+        print("          注意：未识别到标记时，整个文件作为单一语段处理，编号粒度较粗。")
+        print("          建议用 --interviewer-labels / --participant-labels 追加标签，可获得逐句编号。")
     if empty_segments:
         print(f"   [提示] 记录到 {len(empty_segments)} 条空白/极短语段（已写入 word_stats.json）。")
         print("          沉默也是数据，不要当作噪声丢弃。")
+    if not strip_fillers:
+        print("   [提示] 已保留语气词（--keep-fillers）：文本更接近逐字，但引用时仍须核对 00_raw/。")
 
 
 if __name__ == "__main__":

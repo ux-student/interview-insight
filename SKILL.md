@@ -29,7 +29,7 @@ description: 基于三级编码框架（开放编码—轴心编码—选择编�
 | `assets/coding-sheet.md` | 开放编码表模板（中间产物） | 第 3 步 |
 | `assets/tension-record.md` | 反例与张力记录模板（中间产物） | 第 3 步 |
 | `assets/decision_log.md` | 决策日志模板（中间产物） | 全程 |
-| `scripts/preprocess.py` | 预处理脚本 | 第 2 步 |
+| `scripts/preprocess.py` | 预处理脚本（角色分离、清洗、词频、受访者映射） | 第 2 步 |
 | `examples/demo-case.md` | 完整流程演示（**虚构语料，非真实数据**） | 首次使用时 |
 
 ## 工作目录约定
@@ -47,7 +47,7 @@ interview_analysis/
 └── decision_log.md  决策日志
 ```
 
-**中间产物必须落盘，这是本工具的硬要求。** 只交最终报告、不留编码过程的分析无法被复核——当决策者或评审者追问"这个结论怎么来的"，你必须能沿 `报告 → 洞察 → 轴心范畴 → 开放编码 → [S编号] → 原始逐字稿` 逐层反查。跳步直接写报告，视为流程不合格。
+**中间产物必须落盘，这是本工具的硬要求。** 只交最终报告、不留编码过程的分析无法被复核——当决策者或评审者追问"这个结论怎么来的"，你必须能沿 `报告 → 洞察 → 轴心范畴 → 开放编码 → 语段编号 → 原始逐字稿` 逐层反查。跳步直接写报告，视为流程不合格。
 
 ## 工作流程
 
@@ -61,12 +61,20 @@ interview_analysis/
 ### 第 2 步：运行预处理
 
 ```bash
-python3 scripts/preprocess.py --input 00_raw/访谈A.txt --outputdir interview_analysis/01_segments --segments
+# 单份访谈
+python3 scripts/preprocess.py --input 00_raw/访谈A.txt --workdir interview_analysis --segments
+
+# 多份访谈（传整个目录，或显式列出多个文件）——一次跑完，自动加受访者前缀
+python3 scripts/preprocess.py --input 00_raw/ --workdir interview_analysis --segments
 ```
 
+`--workdir` 会自动创建 `00_raw`~`05_report` 全套目录，产物写入 `<workdir>/01_segments/`。
+
 - 默认分析受访者（用户）发言；需要分析访谈者提问时加 `--role interviewer`。
-- 产出 `cleaned_text.txt`（带 `[S段落编号]`，供原话溯源）与 `word_stats.json`（高频候选词）。
-- **注意：清洗后的文本已非逐字字面**（语气词与重复标点被移除）。报告中引用的"原话"指向清洗文本，如需逐字引用须回 `00_raw/` 取原文。
+- **语段编号规则**：单份访谈为 `[S01]`；两份及以上为 `[U1-S01]`、`[U2-S01]`（受访者号 + 该受访者内序号）。多人研究必须能看出语段属于哪位受访者，否则报告中的"x/N 名受访者提及"无从核对。`word_stats.json` 的 `respondent_map` 记录 U 号与源文件的对应关系及各自语段区间。
+- 产出 `cleaned_text.txt`（带编号，供原话溯源）与 `word_stats.json`（高频候选词、受访者映射、空白语段记录）。
+- **注意：清洗后的文本已非逐字字面**（语气词与停顿标记被移除）。报告中引用的"原话"指向清洗文本；如需逐字引用，加 `--keep-fillers` 重跑，或回 `00_raw/` 取原文。
+- 角色标记识别不准时，用 `--interviewer-labels` / `--participant-labels` **追加**标签（与内置标签合并，而非替换）。这比让脚本猜测可靠。
 - 高频词仅作编码线索，**必须回到原文语境核对，禁止直接把高频词当结论**。
 
 ### 第 3 步：三级编码（核心环节）
@@ -75,11 +83,11 @@ python3 scripts/preprocess.py --input 00_raw/访谈A.txt --outputdir interview_a
 
 1. **开放编码** → 写入 `02_codes/open_codes.md`（按 `assets/coding-sheet.md` 模板）。逐句打描述性标签，只描述不推断，复用同语义标签以累计频次。
 2. **轴心编码** → 写入 `03_axial/axial_codes.md`。标签归入 C1 用户与场景 / C2 功能体验 / C3 交互体验 / C4 物理体验（人因）/ C5 态度与期望，并梳理「条件 → 行动 → 结果」关系链。涉及佩戴、握持、操作负荷类产品时，先读 `references/human-factors.md`。
-3. **选择编码** → 写入 `04_themes/themes.md`。围绕研究目标提炼洞察，每条洞察必须含「结论 + 频次 + 原话佐证（标注 [S编号]）+ 业务启示 + 反例检索结果」五要素。
+3. **选择编码** → 写入 `04_themes/themes.md`。围绕研究目标提炼洞察，每条洞察必须含「结论 + 频次 + 原话佐证（标注语段编号 `[Sxx]` 或 `[Ux-Sxx]`）+ 业务启示 + 反例检索结果」五要素。
 4. **反例与张力** → 写入 `04_themes/tension_record.md`（按 `assets/tension-record.md` 模板）。每个主题都要主动检索反例；未找到反例时，写明检索范围与"未发现反例"，**不允许留空**。
 5. **影响程度分级与优先级** → 按 `references/coding-framework.md` 第 4、5 节的锚点与判定规则执行，写进报告第四节，并在 `decision_log.md` 记录分级依据。
 
-多人访谈按"提及人数/N"统计；单份访谈按段落数统计，并明确标注为小样本预研究。
+多人访谈按"提及人数/N"统计；单份访谈按段落数统计，并明确标注为小样本预研究。**人数必须能被语段编号反查**——`[Ux-Sxx]` 自带受访者号，这正是多份访谈不能只做全局连续编号的原因。
 
 ### 第 4 步：按模板交付
 
@@ -90,7 +98,7 @@ python3 scripts/preprocess.py --input 00_raw/访谈A.txt --outputdir interview_a
 
 ## 质量检查清单（交付前逐项核对）
 
-- [ ] 每条结论都有频次与原话佐证，原话可经 [S编号] 在 `01_segments/cleaned_text.txt` 中定位
+- [ ] 每条结论都有频次与原话佐证，原话可经编号（`[Sxx]`／`[Ux-Sxx]`）在 `01_segments/cleaned_text.txt` 中定位
 - [ ] 每个主题都有反例检索结果（含"未发现反例"的检索范围说明），无空白栏位
 - [ ] 影响程度分级有原话证据支撑，未凭印象打分
 - [ ] 没有把推断当开放编码、没有把个案当普遍结论（个案已标注）
